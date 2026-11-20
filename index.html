@@ -6,6 +6,8 @@
 <meta name="theme-color" content="#0b1220">
 <title>Møllelogg</title>
 <link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon.svg">
 <style>
 /* VOICE: rolig, praktisk instrument ved mølla
    IDEA: konsollen på en tredemølle – store tall, én handling
@@ -75,7 +77,7 @@ let person=ls.get('person',null);
 let dev=null,wake=null,timer=null,running=false,connected=false,retry=null,hiddenAt=null,hiddenCount=0;
 let S=null; // aktiv økt
 
-function fresh(){return {samples:[],firstMove:null,lastMove:null,lastT:null,dist:0,mOff:0,mBase:null,mLast:0,kcal:null,kOff:0,kLast:0,cur:{speed:0,incline:0},updated:Date.now()}}
+function fresh(){return {chg:[],pend:null,eBase:null,eLast:0,eOff:0,samples:[],firstMove:null,lastMove:null,lastT:null,dist:0,mOff:0,mBase:null,mLast:0,kcal:null,kOff:0,kLast:0,cur:{speed:0,incline:0},updated:Date.now()}}
 function save(){if(S){S.updated=Date.now();ls.set('active',S)}}
 
 function show(){
@@ -115,6 +117,11 @@ function onData(e){
   if(o.speed!==undefined)S.cur.speed=o.speed;
   if(o.incline!==undefined)S.cur.incline=o.incline;
   if(o.kcal!==undefined){if(o.kcal<S.kLast)S.kOff+=S.kLast;S.kLast=o.kcal;S.kcal=S.kOff+o.kcal}
+  if(o.elapsed!==undefined){
+    if(S.eBase==null)S.eBase=o.elapsed;
+    else if(o.elapsed<S.eLast){S.eOff+=S.eLast-S.eBase;S.eBase=0}
+    S.eLast=o.elapsed;
+  }
   if(o.dist!==undefined){
     if(S.mBase===null)S.mBase=o.dist;
     else if(o.dist<S.mLast){S.mOff+=S.mLast-S.mBase;S.mBase=0}
@@ -124,17 +131,29 @@ function onData(e){
   S.lastT=t;
   if(S.cur.speed>0){if(S.firstMove===null)S.firstMove=t;S.lastMove=t}
   S.samples.push([t,S.cur.speed,S.cur.incline]);
+  track(t);
   render();
   if(++saveTick%10===0)save();
   if(S.firstMove!==null&&S.cur.speed===0&&t-S.lastMove>STOP_MS)finish('Båndet har stått stille i 60 sekunder.');
 }
 
+function track(t){
+  if(!S.chg)S.chg=[];
+  const sp=S.cur.speed,inc=S.cur.incline,last=S.chg[S.chg.length-1];
+  if(last&&last[1]===sp&&last[2]===inc){S.pend=null;return}
+  if(!last){S.chg.push([t,sp,inc]);return}
+  if(!S.pend)S.pend={t0:t,t:t,sp:sp,inc:inc};
+  else if(S.pend.sp!==sp||S.pend.inc!==inc){S.pend.t=t;S.pend.sp=sp;S.pend.inc=inc}
+  if(t-S.pend.t>=3000){S.chg.push([S.pend.t0,sp,inc]);S.pend=null}
+}
+function machSec(){return S.eBase==null?null:(S.eOff+S.eLast-S.eBase)}
 function machKm(){return S.mBase===null?0:(S.mOff+S.mLast-S.mBase)/1000}
 function km(){const m=machKm();return m>0?m:S.dist}
 function render(){
   if(!S)return;
   const ms=S.firstMove===null?0:(S.lastMove-S.firstMove);
-  const s=Math.round(ms/1000);
+  const me=machSec();
+  const s=me!==null&&me>0?me:Math.round(ms/1000);
   $('vT').textContent=Math.floor(s/60)+':'+String(s%60).padStart(2,'0');
   $('vD').textContent=nf(km(),2);
   $('vS').textContent=nf(S.cur.speed,1);
@@ -187,6 +206,21 @@ async function reconnect(){
   catch(e){try{await pick();await connect();status('Tilkoblet igjen.','ok')}catch(e2){status('Feil: '+e2.message,'err')}}
 }
 
+function changes(){
+  const c=(S.chg||[]).slice();
+  if(S.pend&&S.pend.sp>0)c.push([S.pend.t0,S.pend.sp,S.pend.inc]);
+  const fmt=x=>{const s=Math.max(0,Math.round((x-S.firstMove)/1000));return Math.floor(s/60)+':'+String(s%60).padStart(2,'0')};
+  const out=[];
+  for(const [t,sp,inc] of c){
+    if(t>S.lastMove+3000)break;
+    const v=sp+'/'+inc;
+    if(t<=S.firstMove){out.length=0;if(sp>0)out.push(['0:00',v]);continue}
+    if(out.length&&out[out.length-1][1]===v)continue;
+    out.push([fmt(t),v]);
+  }
+  while(out.length>1&&out[out.length-1][1].startsWith('0/'))out.pop();
+  return out.map(x=>x[0]+' '+x[1]).join(' · ');
+}
 function segments(){
   const out=[];
   for(let m=0;;m++){
@@ -212,7 +246,8 @@ async function finish(why){
   if(s.firstMove===null||s.lastMove-s.firstMove<60000){status(why+' Under 1 minutt i bevegelse, ingenting lagret.');return}
   S=s;
   const mv=s.samples.filter(x=>x[0]>=s.firstMove&&x[0]<=s.lastMove&&x[1]>0);
-  const minutes=(s.lastMove-s.firstMove)/60000,k=km(),gaps=segments();
+  const me=machSec();
+  const minutes=me!==null&&me>60?me/60:(s.lastMove-s.firstMove)/60000,k=km(),gaps=changes()||segments();
   const rec={id:person+'-'+s.firstMove,person,start:iso(s.firstMove),end:iso(s.lastMove),
     minutes:Math.round(minutes*10)/10,km:Math.round(k*100)/100,
     avgSpeed:Math.round(k/(minutes/60)*10)/10,

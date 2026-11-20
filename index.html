@@ -33,6 +33,7 @@ h1{font-size:22px;margin:0}
 .pick{display:grid;gap:12px;margin-top:20px}
 .pick button{min-height:72px;border-radius:16px;border:0;font:inherit;font-size:24px;font-weight:600;background:var(--acc);color:#04121c}
 .small{color:var(--mute);font-size:13px;margin-top:22px}
+.sec{width:100%;min-height:52px;margin-top:10px;border:1px solid #2a3756;border-radius:14px;background:var(--panel);color:var(--ink);font:inherit;font-size:18px}
 .hidden{display:none}
 </style>
 </head>
@@ -46,6 +47,8 @@ h1{font-size:22px;margin:0}
 <div id="mainView" class="hidden">
   <div class="top"><h1>Møllelogg</h1><button class="who" id="who"></button></div>
   <button class="big" id="go">Start økt</button>
+  <button class="sec hidden" id="re">Koble til igjen</button>
+  <div class="hidden" id="resume"><button class="sec" id="rc">Koble til og fortsett økta</button><button class="sec" id="rs">Lagre økta slik den er</button></div>
   <div class="status" id="st">Slå på mølla, og trykk Start økt.</div>
   <div class="grid">
     <div class="cell"><b id="vT">0:00</b><span>tid</span></div>
@@ -54,14 +57,14 @@ h1{font-size:22px;margin:0}
     <div class="cell"><b id="vI">0,0</b><span>% stigning</span></div>
   </div>
   <div class="card hidden" id="sum"></div>
-  <p class="small">Økta lagres når båndet har stått stille i 60 sekunder, eller når du trykker Avslutt. Hold siden åpen under økta.</p>
+  <p class="small">Økta lagres når båndet har stått stille i 60 sekunder, eller når du trykker Avslutt. Du kan bytte til andre apper underveis. Mister siden kontakten, kobler den til igjen når du kommer tilbake, eller lar deg fortsette økta.</p>
 </div>
 
 <script>
 {
 const STOP_MS=60000;
 const $=id=>document.getElementById(id);
-const ls={get(k,d){try{const v=localStorage.getItem(k);return v===null?d:JSON.parse(v)}catch(e){return d}},set(k,v){try{localStorage.setItem(k,JSON.stringify(v))}catch(e){}}};
+const ls={get(k,d){try{const v=localStorage.getItem(k);return v===null?d:JSON.parse(v)}catch(e){return d}},set(k,v){try{localStorage.setItem(k,JSON.stringify(v))}catch(e){}},del(k){try{localStorage.removeItem(k)}catch(e){}}};
 if(location.hash.startsWith('#oppsett=')){
   try{const c=JSON.parse(atob(decodeURIComponent(location.hash.slice(9))));if(c.u&&c.k)ls.set('cfg',c)}catch(e){}
   history.replaceState(null,'',location.pathname);
@@ -69,7 +72,11 @@ if(location.hash.startsWith('#oppsett=')){
 const cfg=ls.get('cfg',null);
 const nf=(n,d)=>n.toFixed(d).replace('.',',');
 let person=ls.get('person',null);
-let dev=null,ch=null,wake=null,samples=[],firstMove=null,lastMove=null,lastT=null,dist=0,machDist=null,machDist0=null,kcal=null,timer=null,running=false;
+let dev=null,wake=null,timer=null,running=false,connected=false,retry=null,hiddenAt=null,hiddenCount=0;
+let S=null; // aktiv økt
+
+function fresh(){return {samples:[],firstMove:null,lastMove:null,lastT:null,dist:0,mOff:0,mBase:null,mLast:0,kcal:null,kOff:0,kLast:0,cur:{speed:0,incline:0},updated:Date.now()}}
+function save(){if(S){S.updated=Date.now();ls.set('active',S)}}
 
 function show(){
   $('pickView').classList.toggle('hidden',!!person);
@@ -78,8 +85,11 @@ function show(){
 }
 document.querySelectorAll('[data-p]').forEach(b=>b.addEventListener('click',()=>{person=b.dataset.p;ls.set('person',person);show()}));
 $('who').addEventListener('click',()=>{if(running)return;person=null;show()});
-
 function status(t,c){const s=$('st');s.textContent=t;s.className='status'+(c?' '+c:'')}
+function buttons(){
+  $('go').textContent=running?'Avslutt økt':'Start økt';$('go').classList.toggle('stop',running);
+  $('re').classList.toggle('hidden',!(running&&!connected));
+}
 
 function parse(v){
   let i=0;const f=v.getUint16(i,true);i+=2;const o={};
@@ -97,60 +107,92 @@ function parse(v){
   return o;
 }
 
-let cur={speed:0,incline:0};
+let saveTick=0;
 function onData(e){
+  if(!S)return;
   const o=parse(e.target.value),t=Date.now();
-  if(o.speed!==undefined)cur.speed=o.speed;
-  if(o.incline!==undefined)cur.incline=o.incline;
-  if(o.kcal!==undefined)kcal=o.kcal;
-  if(o.dist!==undefined){if(machDist0===null)machDist0=o.dist;machDist=o.dist-machDist0}
-  if(lastT!==null&&cur.speed>0)dist+=cur.speed*(t-lastT)/3600000;
-  lastT=t;
-  if(cur.speed>0){if(firstMove===null)firstMove=t;lastMove=t}
-  samples.push([t,cur.speed,cur.incline]);
+  if(document.visibilityState==='hidden')hiddenCount++;
+  if(o.speed!==undefined)S.cur.speed=o.speed;
+  if(o.incline!==undefined)S.cur.incline=o.incline;
+  if(o.kcal!==undefined){if(o.kcal<S.kLast)S.kOff+=S.kLast;S.kLast=o.kcal;S.kcal=S.kOff+o.kcal}
+  if(o.dist!==undefined){
+    if(S.mBase===null)S.mBase=o.dist;
+    else if(o.dist<S.mLast){S.mOff+=S.mLast-S.mBase;S.mBase=0}
+    S.mLast=o.dist;
+  }
+  if(S.lastT!==null&&S.cur.speed>0&&t-S.lastT<10000)S.dist+=S.cur.speed*(t-S.lastT)/3600000;
+  S.lastT=t;
+  if(S.cur.speed>0){if(S.firstMove===null)S.firstMove=t;S.lastMove=t}
+  S.samples.push([t,S.cur.speed,S.cur.incline]);
   render();
-  if(firstMove!==null&&cur.speed===0&&t-lastMove>STOP_MS)finish('Båndet har stått stille i 60 sekunder.');
+  if(++saveTick%10===0)save();
+  if(S.firstMove!==null&&S.cur.speed===0&&t-S.lastMove>STOP_MS)finish('Båndet har stått stille i 60 sekunder.');
 }
 
-function km(){return machDist!==null&&machDist>0?machDist/1000:dist}
+function machKm(){return S.mBase===null?0:(S.mOff+S.mLast-S.mBase)/1000}
+function km(){const m=machKm();return m>0?m:S.dist}
 function render(){
-  const ms=firstMove===null?0:(lastMove-firstMove);
+  if(!S)return;
+  const ms=S.firstMove===null?0:(S.lastMove-S.firstMove);
   const s=Math.round(ms/1000);
   $('vT').textContent=Math.floor(s/60)+':'+String(s%60).padStart(2,'0');
   $('vD').textContent=nf(km(),2);
-  $('vS').textContent=nf(cur.speed,1);
-  $('vI').textContent=nf(cur.incline,1);
+  $('vS').textContent=nf(S.cur.speed,1);
+  $('vI').textContent=nf(S.cur.incline,1);
 }
 
-async function start(){
+async function connect(){
+  const srv=await dev.gatt.connect();
+  const svc=await srv.getPrimaryService(0x1826);
+  const ch=await svc.getCharacteristic(0x2ACD);
+  ch.addEventListener('characteristicvaluechanged',onData);
+  await ch.startNotifications();
+  connected=true;buttons();
+}
+function onDisc(){
+  connected=false;buttons();
+  if(!running)return;
+  save();
+  status('Mistet kontakt med mølla. Prøver igjen …','err');
+  let n=0;clearInterval(retry);
+  retry=setInterval(async()=>{
+    if(!running||connected){clearInterval(retry);return}
+    if(++n>24){clearInterval(retry);status('Fikk ikke kontakt. Trykk «Koble til igjen», eller Avslutt for å lagre.','err');return}
+    try{await connect();clearInterval(retry);status('Tilkoblet igjen.','ok')}catch(e){}
+  },5000);
+}
+async function pick(){
+  dev=await navigator.bluetooth.requestDevice({filters:[{services:[0x1826]},{namePrefix:'FS-8'}],optionalServices:[0x1826]});
+  dev.addEventListener('gattserverdisconnected',onDisc);
+}
+
+async function start(resume){
   if(!navigator.bluetooth){status('Denne nettleseren støtter ikke Bluetooth. Bruk Chrome.','err');return}
   try{
-    status('Velg FS-8FA53E i listen …');
-    dev=await navigator.bluetooth.requestDevice({filters:[{services:[0x1826]},{namePrefix:'FS-'}],optionalServices:[0x1826]});
-    dev.addEventListener('gattserverdisconnected',()=>{if(running)finish('Mølla koblet fra.')});
+    status('Velg FS-8FA53E i listen (ikke den med -A) …');
+    await pick();
     status('Kobler til '+dev.name+' …');
-    const srv=await dev.gatt.connect();
-    const svc=await srv.getPrimaryService(0x1826);
-    ch=await svc.getCharacteristic(0x2ACD);
-    ch.addEventListener('characteristicvaluechanged',onData);
-    await ch.startNotifications();
-    samples=[];firstMove=lastMove=lastT=null;dist=0;machDist=machDist0=null;kcal=null;cur={speed:0,incline:0};
-    running=true;$('sum').classList.add('hidden');
-    $('go').textContent='Avslutt økt';$('go').classList.add('stop');
-    status('Tilkoblet. Start båndet når du er klar.','ok');
+    if(!resume){S=fresh();$('sum').classList.add('hidden')}
+    S.lastT=null;
+    await connect();
+    running=true;save();buttons();render();$('resume').classList.add('hidden');
+    status(resume?'Økta fortsetter.':'Tilkoblet. Start båndet når du er klar.','ok');
     try{wake=await navigator.wakeLock.request('screen')}catch(e){}
-    timer=setInterval(()=>{if(running&&firstMove!==null&&cur.speed===0&&Date.now()-lastMove>STOP_MS)finish('Båndet har stått stille i 60 sekunder.')},5000);
+    clearInterval(timer);
+    timer=setInterval(()=>{if(running&&S.firstMove!==null&&S.cur.speed===0&&Date.now()-S.lastMove>STOP_MS)finish('Båndet har stått stille i 60 sekunder.')},5000);
   }catch(e){status(e.name==='NotFoundError'?'Ingen mølle valgt.':'Feil: '+e.message,'err')}
+}
+async function reconnect(){
+  try{status('Kobler til igjen …');if(!dev)await pick();await connect();status('Tilkoblet igjen.','ok')}
+  catch(e){try{await pick();await connect();status('Tilkoblet igjen.','ok')}catch(e2){status('Feil: '+e2.message,'err')}}
 }
 
 function segments(){
-  const mv=samples.filter(s=>s[0]>=firstMove&&s[0]<=lastMove);
-  if(!mv.length)return '';
   const out=[];
   for(let m=0;;m++){
-    const a=firstMove+m*60000;if(a>lastMove)break;
-    const b=samples.filter(s=>s[0]>=a&&s[0]<a+60000);
-    if(!b.length){out.push([0,0]);continue}
+    const a=S.firstMove+m*60000;if(a>S.lastMove)break;
+    const b=S.samples.filter(s=>s[0]>=a&&s[0]<a+60000);
+    if(!b.length){out.push(['?','?']);continue}
     const sp=b.reduce((x,s)=>x+s[1],0)/b.length,inc=b.reduce((x,s)=>x+s[2],0)/b.length;
     out.push([Math.round(sp*2)/2,Math.round(inc*2)/2]);
   }
@@ -158,23 +200,26 @@ function segments(){
   for(const [sp,inc] of out){const r=runs[runs.length-1];if(r&&r[1]===sp&&r[2]===inc)r[0]++;else runs.push([1,sp,inc])}
   return runs.map(r=>r[0]+'×'+r[1]+'/'+r[2]).join(' ');
 }
-
 function iso(t){const d=new Date(t),p=n=>String(n).padStart(2,'0');return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())+' '+p(d.getHours())+':'+p(d.getMinutes())}
 
 async function finish(why){
-  if(!running)return;running=false;clearInterval(timer);
+  if(!S)return;
+  running=false;clearInterval(timer);clearInterval(retry);
   try{if(wake)await wake.release()}catch(e){}
   try{if(dev&&dev.gatt.connected)dev.gatt.disconnect()}catch(e){}
-  $('go').textContent='Start økt';$('go').classList.remove('stop');
-  if(firstMove===null||lastMove-firstMove<60000){status(why+' Under 1 minutt i bevegelse, ingenting lagret.');return}
-  const mv=samples.filter(s=>s[0]>=firstMove&&s[0]<=lastMove&&s[1]>0);
-  const minutes=(lastMove-firstMove)/60000,k=km();
-  const rec={key:cfg?cfg.k:'',id:person+'-'+firstMove,person,start:iso(firstMove),end:iso(lastMove),
+  connected=false;buttons();$('resume').classList.add('hidden');
+  const s=S;S=null;ls.del('active');
+  if(s.firstMove===null||s.lastMove-s.firstMove<60000){status(why+' Under 1 minutt i bevegelse, ingenting lagret.');return}
+  S=s;
+  const mv=s.samples.filter(x=>x[0]>=s.firstMove&&x[0]<=s.lastMove&&x[1]>0);
+  const minutes=(s.lastMove-s.firstMove)/60000,k=km(),gaps=segments();
+  const rec={id:person+'-'+s.firstMove,person,start:iso(s.firstMove),end:iso(s.lastMove),
     minutes:Math.round(minutes*10)/10,km:Math.round(k*100)/100,
     avgSpeed:Math.round(k/(minutes/60)*10)/10,
-    maxSpeed:Math.max(...mv.map(s=>s[1])),
-    avgIncline:Math.round(mv.reduce((x,s)=>x+s[2],0)/mv.length*10)/10,
-    kcal:kcal,segments:segments()};
+    maxSpeed:mv.length?Math.max(...mv.map(x=>x[1])):0,
+    avgIncline:mv.length?Math.round(mv.reduce((x,y)=>x+y[2],0)/mv.length*10)/10:0,
+    kcal:s.kcal,segments:gaps};
+  S=null;
   const q=ls.get('queue',[]);q.push(rec);ls.set('queue',q);
   $('sum').innerHTML='<h2>Økta</h2><p>'+nf(rec.minutes,1)+' min · '+nf(rec.km,2)+' km · snitt '+nf(rec.avgSpeed,1)+' km/t</p><p>Maks '+nf(rec.maxSpeed,1)+' km/t · snittstigning '+nf(rec.avgIncline,1)+' %</p>';
   $('sum').classList.remove('hidden');
@@ -195,11 +240,28 @@ async function flush(){
   else status('Lagret i regnearket ✓','ok');
 }
 
-$('go').addEventListener('click',()=>running?finish('Avsluttet.'):start());
-document.addEventListener('visibilitychange',async()=>{if(running&&document.visibilityState==='visible'){try{wake=await navigator.wakeLock.request('screen')}catch(e){}}});
+$('go').addEventListener('click',()=>running?finish('Avsluttet.'):start(false));
+$('re').addEventListener('click',reconnect);
+$('rc').addEventListener('click',()=>start(true));
+$('rs').addEventListener('click',()=>finish('Lagret.'));
+document.addEventListener('visibilitychange',async()=>{
+  if(!running)return;
+  if(document.visibilityState==='hidden'){hiddenAt=Date.now();hiddenCount=0;save();return}
+  try{wake=await navigator.wakeLock.request('screen')}catch(e){}
+  if(hiddenAt){const sec=Math.round((Date.now()-hiddenAt)/1000);status('Borte i '+sec+' s · '+hiddenCount+' målinger mottatt imens'+(connected?'.':' · ikke tilkoblet'),connected?'ok':'err');hiddenAt=null}
+});
+window.addEventListener('pagehide',save);
 show();
-if(!cfg)status('Mangler oppsett. Åpne oppsettslenken du fikk av Claude én gang på denne telefonen.','err');
-else flush();
+const act=ls.get('active',null);
+if(act&&Date.now()-act.updated<3*3600000&&act.firstMove!==null){
+  S=act;running=false;render();
+  $('resume').classList.remove('hidden');
+  status('En påbegynt økt ble avbrutt. Fortsett den, eller lagre den slik den er.','err');
+}else{
+  if(act)ls.del('active');
+  if(!cfg)status('Mangler oppsett. Åpne oppsettslenken du fikk av Claude én gang på denne telefonen.','err');
+  else flush();
+}
 }
 </script>
 </body>

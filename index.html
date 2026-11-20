@@ -129,7 +129,11 @@ function onData(e){
   }
   if(S.lastT!==null&&S.cur.speed>0&&t-S.lastT<10000)S.dist+=S.cur.speed*(t-S.lastT)/3600000;
   S.lastT=t;
-  if(S.cur.speed>0){if(S.firstMove===null)S.firstMove=t;S.lastMove=t}
+  if(S.cur.speed>0){
+    if(S.firstMove===null)S.firstMove=t;
+    if(S.gap){if(machKm()-S.gap.km<0.03)S.pauseMs=(S.pauseMs||0)+(t-S.gap.t);S.gap=null}
+    S.lastMove=t;
+  }
   S.samples.push([t,S.cur.speed,S.cur.incline]);
   track(t);
   render();
@@ -151,7 +155,7 @@ function machKm(){return S.mBase===null?0:(S.mOff+S.mLast-S.mBase)/1000}
 function km(){const m=machKm();return m>0?m:S.dist}
 function render(){
   if(!S)return;
-  const ms=S.firstMove===null?0:(S.lastMove-S.firstMove);
+  const ms=S.firstMove===null?0:(S.lastMove-S.firstMove-(S.pauseMs||0));
   const me=machSec();
   const s=me!==null&&me>0?me:Math.round(ms/1000);
   $('vT').textContent=Math.floor(s/60)+':'+String(s%60).padStart(2,'0');
@@ -160,13 +164,15 @@ function render(){
   $('vI').textContent=nf(S.cur.incline,1);
 }
 
+function withTimeout(p,ms){return Promise.race([p,new Promise((_,rej)=>setTimeout(()=>rej(new Error('tidsavbrudd')),ms))])}
 async function connect(){
-  const srv=await dev.gatt.connect();
+  const srv=await withTimeout(dev.gatt.connect(),8000);
   const svc=await srv.getPrimaryService(0x1826);
   const ch=await svc.getCharacteristic(0x2ACD);
   ch.addEventListener('characteristicvaluechanged',onData);
   await ch.startNotifications();
   connected=true;buttons();
+  if(S&&S.lastMove&&!S.gap&&Date.now()-S.lastMove>5000){S.gap={t:S.lastMove,km:machKm()};S.lastMove=Date.now();save()}
 }
 function onDisc(){
   connected=false;buttons();
@@ -202,6 +208,7 @@ async function start(resume){
   }catch(e){status(e.name==='NotFoundError'?'Ingen mølle valgt.':'Feil: '+e.message,'err')}
 }
 async function reconnect(){
+  clearInterval(retry);
   try{status('Kobler til igjen …');if(!dev)await pick();await connect();status('Tilkoblet igjen.','ok')}
   catch(e){try{await pick();await connect();status('Tilkoblet igjen.','ok')}catch(e2){status('Feil: '+e2.message,'err')}}
 }
@@ -213,7 +220,9 @@ function changes(){
   const out=[];
   for(const [t,sp,inc] of c){
     if(t>S.lastMove+3000)break;
+    if(sp>0&&sp<0.8)continue;
     const v=sp+'/'+inc;
+    if(!out.length&&sp===0)continue;
     if(t<=S.firstMove){out.length=0;if(sp>0)out.push(['0:00',v]);continue}
     if(out.length&&out[out.length-1][1]===v)continue;
     out.push([fmt(t),v]);
@@ -243,11 +252,12 @@ async function finish(why){
   try{if(dev&&dev.gatt.connected)dev.gatt.disconnect()}catch(e){}
   connected=false;buttons();$('resume').classList.add('hidden');
   const s=S;S=null;ls.del('active');
-  if(s.firstMove===null||s.lastMove-s.firstMove<60000){status(why+' Under 1 minutt i bevegelse, ingenting lagret.');return}
+  if(s.firstMove===null||(s.gap?s.gap.t:s.lastMove)-s.firstMove-(s.pauseMs||0)<60000){status(why+' Under 1 minutt i bevegelse, ingenting lagret.');return}
   S=s;
+  if(s.gap){s.lastMove=s.gap.t;s.gap=null}
   const mv=s.samples.filter(x=>x[0]>=s.firstMove&&x[0]<=s.lastMove&&x[1]>0);
   const me=machSec();
-  const minutes=me!==null&&me>60?me/60:(s.lastMove-s.firstMove)/60000,k=km(),gaps=changes()||segments();
+  const minutes=me!==null&&me>60?me/60:(s.lastMove-s.firstMove-(s.pauseMs||0))/60000,k=km(),gaps=changes()||segments();
   const rec={id:person+'-'+s.firstMove,person,start:iso(s.firstMove),end:iso(s.lastMove),
     minutes:Math.round(minutes*10)/10,km:Math.round(k*100)/100,
     avgSpeed:Math.round(k/(minutes/60)*10)/10,

@@ -77,7 +77,7 @@ let person=ls.get('person',null);
 let dev=null,wake=null,timer=null,running=false,connected=false,retry=null,hiddenAt=null,hiddenCount=0;
 let S=null; // aktiv økt
 
-function fresh(){return {chg:[],pend:null,eBase:null,eLast:0,eOff:0,samples:[],firstMove:null,lastMove:null,lastT:null,dist:0,mOff:0,mBase:null,mLast:0,kcal:null,kOff:0,kLast:0,cur:{speed:0,incline:0},updated:Date.now()}}
+function fresh(){return {chg:[],pend:null,eBase:null,eLast:0,eOff:0,samples:[],firstMove:null,lastMove:null,lastT:null,dist:0,mOff:0,mBase:null,mLast:0,kcal:null,kBase:null,kOff:0,kLast:0,cur:{speed:0,incline:0},updated:Date.now()}}
 function save(){if(S){S.updated=Date.now();ls.set('active',S)}}
 
 function show(){
@@ -120,10 +120,19 @@ function onData(e){
   // Tellere fra mølla skal bare gå opp. Små nedganger er støy og ignoreres;
   // bare et fall til nær null regnes som at mølla er nullstilt.
   if(o.kcal!==undefined){
+    // Mølla kan vise forrige økts kcal før den nullstilles. Første verdi er derfor basis,
+    // og en nullstilling før båndet har gått starter tellingen på nytt.
     S.kRaw=o.kcal;
-    if(o.kcal<S.kLast){if(o.kcal<5&&S.kLast>10){S.kOff+=S.kLast;S.kLast=o.kcal;S.nReset=(S.nReset||0)+1}}
+    if(S.kBase==null){S.kBase=o.kcal;S.kLast=o.kcal}
+    else if(o.kcal<S.kLast){
+      if(o.kcal<5&&S.kLast>10){
+        if(S.firstMove===null){S.kOff=0;S.kBase=o.kcal}
+        else{S.kOff+=S.kLast-S.kBase;S.kBase=0}
+        S.kLast=o.kcal;S.nReset=(S.nReset||0)+1;
+      }
+    }
     else S.kLast=o.kcal;
-    S.kcal=S.kOff+S.kLast;
+    S.kcal=S.kOff+S.kLast-S.kBase;
   }
   if(o.elapsed!==undefined){
     if(S.eBase==null){S.eBase=o.elapsed;S.eLast=o.elapsed}
@@ -279,7 +288,7 @@ async function finish(why){
   // Diagnose legges i tempo-kolonnen, så den kommer med uten endring i mottakeren.
   const diag=['km-kilde '+(s.gotDist?'mølle':'beregnet'),'mølle-km '+(s.mRaw!=null?nf(s.mRaw/1000,2):'–'),'mølle-kcal '+(s.kRaw!=null?s.kRaw:'–'),
     'mølle-sek '+(me!=null?me:'–'),'pakker '+(s.nPk||0),'bakgrunn '+Math.round((s.hidMs||0)/1000)+'s','hull '+Math.round((s.lostMs||0)/1000)+'s',
-    'reset '+(s.nReset||0),'v2'];
+    'reset '+(s.nReset||0),'v3'];
   rec.segments=(gaps?gaps+' | ':'')+'diag: '+diag.join(', ');
   S=null;
   const q=ls.get('queue',[]);q.push(rec);ls.set('queue',q);

@@ -116,18 +116,27 @@ function onData(e){
   if(document.visibilityState==='hidden')hiddenCount++;
   if(o.speed!==undefined)S.cur.speed=o.speed;
   if(o.incline!==undefined)S.cur.incline=o.incline;
-  if(o.kcal!==undefined){if(o.kcal<S.kLast)S.kOff+=S.kLast;S.kLast=o.kcal;S.kcal=S.kOff+o.kcal}
+  S.nPk=(S.nPk||0)+1;
+  // Tellere fra mølla skal bare gå opp. Små nedganger er støy og ignoreres;
+  // bare et fall til nær null regnes som at mølla er nullstilt.
+  if(o.kcal!==undefined){
+    S.kRaw=o.kcal;
+    if(o.kcal<S.kLast){if(o.kcal<5&&S.kLast>10){S.kOff+=S.kLast;S.kLast=o.kcal;S.nReset=(S.nReset||0)+1}}
+    else S.kLast=o.kcal;
+    S.kcal=S.kOff+S.kLast;
+  }
   if(o.elapsed!==undefined){
-    if(S.eBase==null)S.eBase=o.elapsed;
-    else if(o.elapsed<S.eLast){S.eOff+=S.eLast-S.eBase;S.eBase=0}
-    S.eLast=o.elapsed;
+    if(S.eBase==null){S.eBase=o.elapsed;S.eLast=o.elapsed}
+    else if(o.elapsed<S.eLast){if(o.elapsed<10&&S.eLast>60){S.eOff+=S.eLast-S.eBase;S.eBase=0;S.eLast=o.elapsed;S.nReset=(S.nReset||0)+1}}
+    else S.eLast=o.elapsed;
   }
   if(o.dist!==undefined){
-    if(S.mBase===null)S.mBase=o.dist;
-    else if(o.dist<S.mLast){S.mOff+=S.mLast-S.mBase;S.mBase=0}
-    S.mLast=o.dist;
+    S.gotDist=true;S.mRaw=o.dist;
+    if(S.mBase===null){S.mBase=o.dist;S.mLast=o.dist}
+    else if(o.dist<S.mLast){if(o.dist<50&&S.mLast>100){S.mOff+=S.mLast-S.mBase;S.mBase=0;S.mLast=o.dist;S.nReset=(S.nReset||0)+1}}
+    else S.mLast=o.dist;
   }
-  if(S.lastT!==null&&S.cur.speed>0&&t-S.lastT<10000)S.dist+=S.cur.speed*(t-S.lastT)/3600000;
+  if(S.lastT!==null&&S.cur.speed>0){if(t-S.lastT<10000)S.dist+=S.cur.speed*(t-S.lastT)/3600000;else S.lostMs=(S.lostMs||0)+(t-S.lastT)}
   S.lastT=t;
   if(S.cur.speed>0){
     if(S.firstMove===null)S.firstMove=t;
@@ -143,12 +152,15 @@ function onData(e){
 
 function track(t){
   if(!S.chg)S.chg=[];
-  const sp=S.cur.speed,inc=S.cur.incline,last=S.chg[S.chg.length-1];
-  if(last&&last[1]===sp&&last[2]===inc){S.pend=null;return}
+  // Avrunder og sammenligner med toleranse, så små svingninger i målt fart
+  // (f.eks. 4,48/4,52) ikke hindrer at en endring blir registrert.
+  const sp=Math.round(S.cur.speed*10)/10,inc=Math.round(S.cur.incline*2)/2,last=S.chg[S.chg.length-1];
+  const same=(a,b)=>Math.abs(a[0]-b[0])<0.2&&Math.abs(a[1]-b[1])<0.5;
+  if(last&&same([last[1],last[2]],[sp,inc])){S.pend=null;return}
   if(!last){S.chg.push([t,sp,inc]);return}
   if(!S.pend)S.pend={t0:t,t:t,sp:sp,inc:inc};
-  else if(S.pend.sp!==sp||S.pend.inc!==inc){S.pend.t=t;S.pend.sp=sp;S.pend.inc=inc}
-  if(t-S.pend.t>=3000){S.chg.push([S.pend.t0,sp,inc]);S.pend=null}
+  else if(!same([S.pend.sp,S.pend.inc],[sp,inc])){S.pend.t=t;S.pend.sp=sp;S.pend.inc=inc}
+  if(t-S.pend.t>=3000){S.chg.push([S.pend.t0,S.pend.sp,S.pend.inc]);S.pend=null}
 }
 function machSec(){return S.eBase==null?null:(S.eOff+S.eLast-S.eBase)}
 function machKm(){return S.mBase===null?0:(S.mOff+S.mLast-S.mBase)/1000}
@@ -264,6 +276,11 @@ async function finish(why){
     maxSpeed:mv.length?Math.max(...mv.map(x=>x[1])):0,
     avgIncline:mv.length?Math.round(mv.reduce((x,y)=>x+y[2],0)/mv.length*10)/10:0,
     kcal:s.kcal,segments:gaps};
+  // Diagnose legges i tempo-kolonnen, så den kommer med uten endring i mottakeren.
+  const diag=['km-kilde '+(s.gotDist?'mølle':'beregnet'),'mølle-km '+(s.mRaw!=null?nf(s.mRaw/1000,2):'–'),'mølle-kcal '+(s.kRaw!=null?s.kRaw:'–'),
+    'mølle-sek '+(me!=null?me:'–'),'pakker '+(s.nPk||0),'bakgrunn '+Math.round((s.hidMs||0)/1000)+'s','hull '+Math.round((s.lostMs||0)/1000)+'s',
+    'reset '+(s.nReset||0),'v2'];
+  rec.segments=(gaps?gaps+' | ':'')+'diag: '+diag.join(', ');
   S=null;
   const q=ls.get('queue',[]);q.push(rec);ls.set('queue',q);
   $('sum').innerHTML='<h2>Økta</h2><p>'+nf(rec.minutes,1)+' min · '+nf(rec.km,2)+' km · snitt '+nf(rec.avgSpeed,1)+' km/t</p><p>Maks '+nf(rec.maxSpeed,1)+' km/t · snittstigning '+nf(rec.avgIncline,1)+' %</p>';
@@ -293,6 +310,7 @@ document.addEventListener('visibilitychange',async()=>{
   if(!running)return;
   if(document.visibilityState==='hidden'){hiddenAt=Date.now();hiddenCount=0;save();return}
   try{wake=await navigator.wakeLock.request('screen')}catch(e){}
+  if(hiddenAt&&S)S.hidMs=(S.hidMs||0)+(Date.now()-hiddenAt);
   if(hiddenAt){const sec=Math.round((Date.now()-hiddenAt)/1000);status('Borte i '+sec+' s · '+hiddenCount+' målinger mottatt imens'+(connected?'.':' · ikke tilkoblet'),connected?'ok':'err');hiddenAt=null}
 });
 window.addEventListener('pagehide',save);
